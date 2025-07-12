@@ -1,0 +1,178 @@
+from qiskit import QuantumCircuit, transpile
+from qiskit.visualization import plot_histogram
+from qiskit_aer import Aer
+from qiskit_aer import AerSimulator
+import numpy as np
+import os # For generating random keys securely
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+
+# --- E91 QKD Simulation ---
+
+def generate_entangled_pair():
+    """Generates a Bell state |phi+> (1/sqrt(2) * (|00> + |11>))."""
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    return qc
+
+def choose_random_bases(num_bits):
+    """Alice and Bob randomly choose measurement bases (0 for Z, 1 for X)."""
+    return np.random.randint(0, 2, num_bits)
+
+def measure_qubit(qubit_index, basis, quantum_circuit, classical_bit_index):
+    """Measures a qubit in the Z or X basis."""
+    if basis == 1: # X basis
+        quantum_circuit.h(qubit_index)
+    quantum_circuit.measure(qubit_index, classical_bit_index)
+
+def simulate_e91_qkd(num_qubits, eve_present=False):
+    alice_key = []
+    bob_key = []
+    alice_bases = choose_random_bases(num_qubits)
+    bob_bases = choose_random_bases(num_qubits)
+    qber_errors = 0
+
+    simulator = AerSimulator() # Use AerSimulator directly
+
+    for i in range(num_qubits):
+        qc = generate_entangled_pair() # Fresh entangled pair for each bit
+
+        # Alice's measurement
+        measure_qubit(0, alice_bases[i], qc, 0)
+
+        # --- EVE's Intervention (if present) ---
+        if eve_present:
+            # Simulate Eve intercepting and re-sending (simple intercept-resend)
+            eve_basis = np.random.randint(0, 2) # Eve's random basis
+            measure_qubit(0, eve_basis, qc, 0) # Eve measures Alice's qubit (disturbs entanglement)
+            # Re-prepare based on Eve's measurement (very simplified)
+            # For a more accurate simulation, Eve would measure and then prepare a new qubit
+            # based on her measurement result to send to Bob. This is more complex in Qiskit.
+            # For now, let's just assume her measurement already introduces errors.
+            # A more sophisticated Eve would require re-creating the circuit for Bob.
+
+        # Bob's measurement
+        measure_qubit(1, bob_bases[i], qc, 1)
+
+        # Execute circuit
+        compiled_circuit = transpile(qc, simulator)
+        job = simulator.run(compiled_circuit, shots=1)
+        result = job.result()
+        counts = result.get_counts(qc)
+
+        # Get the result (e.g., '00' -> Alice=0, Bob=0)
+        # This assumes the classical bits map to Alice's and Bob's measurements
+        measured_bits = list(counts.keys())[0] # e.g., '01'
+        alice_bit = int(measured_bits[0])
+        bob_bit = int(measured_bits[1])
+
+        # Sifting (Alice and Bob compare bases)
+        if alice_bases[i] == bob_bases[i]:
+            alice_key.append(alice_bit)
+            bob_key.append(bob_bit)
+            if alice_bit != bob_bit:
+                qber_errors += 1
+
+    # Calculate QBER
+    sifted_key_length = len(alice_key)
+    qber = qber_errors / sifted_key_length if sifted_key_length > 0 else 0
+
+    return alice_key, bob_key, qber, alice_bases, bob_bases
+
+# --- AES-128 Encryption/Decryption ---
+
+def encrypt_aes(key, plaintext):
+    cipher = AES.new(key, AES.MODE_CBC)
+    ct_bytes = cipher.encrypt(pad(plaintext.encode('utf-8'), AES.block_size))
+    return cipher.iv + ct_bytes # IV needs to be sent with ciphertext
+
+def decrypt_aes(key, ciphertext):
+    iv = ciphertext[:AES.block_size]
+    ct = ciphertext[AES.block_size:]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    pt = unpad(cipher.decrypt(ct), AES.block_size)
+    return pt.decode('utf-8')
+
+# --- Simulation Scenarios ---
+
+# Scenario 1: Traditional LoRaWAN (Simulated Pre-shared Key)
+print("--- Scenario 1: Traditional LoRaWAN (Simulated Pre-shared Key) ---")
+# In a real scenario, this key would be provisioned during device activation
+pre_shared_aes_key = os.urandom(16) # 128-bit key
+lora_payload = input("Enter your message")
+print(f"Pre-shared AES Key: {pre_shared_aes_key.hex()}")
+
+# Attacker (Eve) knows the pre-shared key
+simulated_attacker_key = pre_shared_aes_key
+
+# Encryption
+encrypted_data = encrypt_aes(pre_shared_aes_key, lora_payload)
+print(f"Encrypted data: {encrypted_data.hex()}")
+
+# Decryption by legitimate receiver
+decrypted_data = decrypt_aes(pre_shared_aes_key, encrypted_data)
+print(f"Decrypted data (legitimate): {decrypted_data}")
+
+# Attacker tries to decrypt with the known key
+try:
+    attacker_decrypted_data = decrypt_aes(simulated_attacker_key, encrypted_data)
+    print(f"Attacker decrypted data (known key): {attacker_decrypted_data}")
+    print("CONCLUSION (Scenario 1): If the pre-shared key is compromised, security is broken.")
+except Exception as e:
+    print(f"Attacker decryption failed: {e}")
+
+
+print("\n--- Scenario 2: LoRaWAN with E91 QKD for Key Generation (No Eavesdropper) ---")
+num_qkd_bits = 200 # Number of entangled pairs to generate raw key
+alice_raw_key_no_eve, bob_raw_key_no_eve, qber_no_eve, _, _ = simulate_e91_qkd(num_qkd_bits, eve_present=False)
+
+print(f"QBER (No Eve): {qber_no_eve:.4f}")
+if qber_no_eve < 0.1: # Threshold for acceptable QBER
+    print("QKD successful (low QBER). Proceeding with key generation.")
+    # For a real system, you'd perform privacy amplification and error correction
+    # For simulation, just take the first 16 bytes for AES key
+    shared_qkd_key_bytes = bytes(alice_raw_key_no_eve[:16])
+    if len(shared_qkd_key_bytes) < 16:
+        print("Warning: Not enough QKD bits for a 128-bit AES key. Increase num_qkd_bits.")
+        shared_qkd_key_bytes = pad(shared_qkd_key_bytes, 16) # Pad if too short for demo
+    print(f"Generated AES Key (from E91): {shared_qkd_key_bytes.hex()}")
+
+    lora_payload_qkd = input("Enter the message")
+    encrypted_data_qkd = encrypt_aes(shared_qkd_key_bytes, lora_payload_qkd)
+    print(f"Encrypted data (QKD key): {encrypted_data_qkd.hex()}")
+    decrypted_data_qkd = decrypt_aes(shared_qkd_key_bytes, encrypted_data_qkd)
+    print(f"Decrypted data (QKD key): {decrypted_data_qkd}")
+
+    # Attacker tries to decrypt with a random key (because they couldn't get the QKD key)
+    random_attacker_key = os.urandom(16)
+    try:
+        attacker_decrypted_data_qkd_random = decrypt_aes(random_attacker_key, encrypted_data_qkd)
+        print(f"Attacker decrypted data (random key): {attacker_decrypted_data_qkd_random}")
+    except Exception as e:
+        print(f"Attacker decryption failed with random key: {e} (Expected)")
+
+else:
+    print("QKD failed (high QBER). Key generation aborted.")
+
+
+print("\n--- Scenario 3: LoRaWAN with E91 QKD for Key Generation (WITH Eavesdropper) ---")
+num_qkd_bits = 200
+alice_raw_key_eve, bob_raw_key_eve, qber_eve, _, _ = simulate_e91_qkd(num_qkd_bits, eve_present=True)
+
+print(f"QBER (With Eve): {qber_eve:.4f}")
+if qber_eve < 0.1: # This threshold should be adjusted based on actual QKD error rates
+    print("QKD successful (low QBER), despite Eve being present. This indicates a very simplistic Eve simulation.")
+    print("In a more realistic simulation, Eve's presence *must* cause a high QBER, leading to key rejection.")
+    # For demonstration, let's still try to use the key if it passed the simplistic QBER check
+    shared_qkd_key_bytes_eve = bytes(alice_raw_key_eve[:16])
+    if len(shared_qkd_key_bytes_eve) < 16:
+        shared_qkd_key_bytes_eve = pad(shared_qkd_key_bytes_eve, 16)
+    print(f"Generated AES Key (from E91, with Eve): {shared_qkd_key_bytes_eve.hex()}")
+    encrypted_data_qkd_eve = encrypt_aes(shared_qkd_key_bytes_eve, lora_payload_qkd)
+    print(f"Encrypted data (QKD key, with Eve): {encrypted_data_qkd_eve.hex()}")
+    decrypted_data_qkd_eve = decrypt_aes(shared_qkd_key_bytes_eve, encrypted_data_qkd_eve)
+    print(f"Decrypted data (QKD key, with Eve): {decrypted_data_qkd_eve}")
+else:
+    print("QKD failed (high QBER) due to Eavesdropper. Key generation aborted. Security maintained!")
+    print("CONCLUSION (Scenario 3): E91 detects Eve, preventing a compromised key from being used for encryption.")
