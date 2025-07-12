@@ -1,0 +1,130 @@
+import random
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import AerSimulator
+from qiskit.quantum_info import Statevector
+
+# --- E91 Quantum Key Distribution Protocol Simulation ---
+
+# Step 1: Define key parameters
+key_length = 20  # Number of entangled pairs to generate
+
+# Step 2: Alice and Bob's random basis choices
+# In E91, Alice and Bob each randomly choose between three bases for their measurements.
+# For simplicity and to focus on the core entanglement, we'll use Z and X bases here,
+# similar to how BB84 might be simplified. A full E91 would include an intermediate basis.
+alice_bases = [random.choice(['Z', 'X']) for _ in range(key_length)]
+bob_bases = [random.choice(['Z', 'X']) for _ in range(key_length)]
+
+# Step 3: Create circuits for generating entangled pairs and performing measurements
+circuits = []
+for i in range(key_length):
+    qc = QuantumCircuit(2, 2)  # Two qubits for the entangled pair, two classical bits for measurement
+
+    # 1. Source creates an EPR pair (e.g., Bell state |Φ+⟩ = (|00⟩ + |11⟩)/√2)
+    qc.h(0)  # Apply Hadamard to qubit 0
+    qc.cx(0, 1)  # Apply CNOT with qubit 0 as control, qubit 1 as target
+
+    # 2. Alice measures her qubit (qubit 0) in her chosen basis
+    if alice_bases[i] == 'X':
+        qc.h(0)  # Apply Hadamard for X-basis measurement
+    qc.measure(0, 0) # Measure qubit 0 into classical bit 0
+
+    # 3. Bob measures his qubit (qubit 1) in his chosen basis
+    if bob_bases[i] == 'X':
+        qc.h(1)  # Apply Hadamard for X-basis measurement
+    qc.measure(1, 1) # Measure qubit 1 into classical bit 1
+
+    circuits.append(qc)
+
+# Step 4: Simulate the circuits using AerSimulator
+simulator = AerSimulator()
+transpiled_circuits = transpile(circuits, simulator)
+job = simulator.run(transpiled_circuits, shots=1) # Only 1 shot per circuit for key generation
+results = job.result()
+
+# Step 5: Extract Alice's and Bob's measured bits
+alice_measured_bits = []
+bob_measured_bits = []
+
+for i, circuit in enumerate(circuits):
+    counts = results.get_counts(circuit)
+    # The counts will be like {'00': 1}, {'01': 1}, {'10': 1}, {'11': 1}
+    # We need to extract the first classical bit for Alice and the second for Bob
+    measured_result = list(counts.keys())[0] # Get the single result string e.g., '01'
+    bob_measured_bits.append(int(measured_result[0]))  # First char is Bob's (from qc.measure(1,1))
+    alice_measured_bits.append(int(measured_result[1])) # Second char is Alice's (from qc.measure(0,0))
+
+
+# Step 6: Public announcement of bases and key sifting
+shared_key_alice = []
+shared_key_bob = [] # Bob's sifted key will be compared with Alice's for consistency check
+
+# For E91, the "bits" themselves don't form the key directly;
+# the correlations between Alice and Bob's measurements, given their basis choices,
+# are used. When their bases match, their measurement outcomes should be correlated
+# (e.g., both 0 or both 1 for |Φ+⟩, both 0/1 for |Ψ+⟩, depending on the entangled state).
+
+print("\n--- E91 Protocol Results ---")
+print(f"Key Length: {key_length}")
+print(f"Alice's chosen bases: {alice_bases}")
+print(f"Bob's chosen bases:   {bob_bases}")
+print(f"Alice's measured bits: {alice_measured_bits}")
+print(f"Bob's measured bits:   {bob_measured_bits}")
+
+print("\n--- Key Sifting ---")
+potential_key_pairs = [] # Store pairs of (Alice's bit, Bob's bit) when bases match
+for i in range(key_length):
+    if alice_bases[i] == bob_bases[i]:
+        # If bases match, Alice and Bob should get correlated results
+        # For |Phi+> state, if measured in same basis, results should be identical.
+        shared_key_alice.append(alice_measured_bits[i])
+        shared_key_bob.append(bob_measured_bits[i])
+        potential_key_pairs.append(f"({alice_measured_bits[i]}, {bob_measured_bits[i]})")
+    else:
+        potential_key_pairs.append("(Discarded - Bases Mismatch)")
+
+print(f"Potential key pairs (Alice, Bob) after basis comparison: {potential_key_pairs}")
+
+# Step 7: Consistency check and final key (ignoring error rate for simplicity)
+final_key = []
+for i in range(len(shared_key_alice)):
+    if shared_key_alice[i] == shared_key_bob[i]:
+        final_key.append(shared_key_alice[i])
+    else:
+        # In a real E91, this would indicate an error or eavesdropping.
+        # For this simulation, we'll still include it in the potential key but note the discrepancy.
+        final_key.append(shared_key_alice[i]) # Alice's bit
+        print(f"Warning: Discrepancy detected at index {i} in sifted key (Alice: {shared_key_alice[i]}, Bob: {shared_key_bob[i]})")
+
+print(f"\nAlice's sifted key (where bases matched): {shared_key_alice}")
+print(f"Bob's sifted key (where bases matched):   {shared_key_bob}")
+print(f"Final shared key (after consistency check): {final_key}")
+
+# Security check (simplified): In a real E91, they would compare a subset of the shared key
+# publicly to estimate the quantum bit error rate (QBER) and detect eavesdropping.
+# If QBER is too high, they abort.
+
+# This simulation demonstrates the core concept:
+# - Entangled pair generation (|Φ+> in this case)
+# - Random basis measurements by Alice and Bob
+# - Correlation when bases match, forming the basis of the shared key.
+import math
+
+def binary_entropy(q):
+    if q == 0 or q == 1:
+        return 0
+    return -q * math.log2(q) - (1 - q) * math.log2(1 - q)
+
+def qber_threshold(f=1.1):
+    # Solve 1 - h(Q) - f*h(Q) = 0 --> 1 = (1 + f)*h(Q)
+    # h(Q) = 1 / (1 + f)
+    target_h = 1 / (1 + f)
+    
+    # Since h(Q) is symmetric and monotonic in [0,0.5], do numeric search
+    for q in [i/1000 for i in range(500)]:
+        if abs(binary_entropy(q) - target_h) < 0.001:
+            return q
+    return None
+
+threshold = qber_threshold(f=1.1)
+print(f"Estimated QBER threshold: {threshold*100:.2f}%")
